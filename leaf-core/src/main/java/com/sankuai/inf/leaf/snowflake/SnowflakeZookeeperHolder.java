@@ -46,6 +46,13 @@ public class SnowflakeZookeeperHolder {
         this.connectionString = connectionString;
     }
 
+    /**
+     * 启动应用使用zk的curator客户端连接zk，判断leaf指定业务的根节点是否存在，leaf中使用的划分逻辑如下
+     * /snowflake/leafname/forever/ip:port-0000000001
+     * /snowflake/leafname(不同业务可以使用不同名字)订单，用户/forever/ip:port(这里指的是提供id生产服务的机器)-0000000001(顺序节点序号)
+     * 里面的内容存的是endpoint内容{"ip","xxx.xxx.xxx.xxx","port":"8080","timestamp":"timestamp"}
+     * 先扫描业务目录，如果业务目录不存在那么说明第一次启动这个业务，因此当前主机要把自己的信息保存进去，默认id为0，这里面可能会存在潜在的并发问题？？
+     */
     public boolean init() {
         try {
             CuratorFramework curator = createWithOptions(connectionString, new RetryUntilElapsed(1000, 4), 10000, 6000);
@@ -55,11 +62,14 @@ public class SnowflakeZookeeperHolder {
                 //不存在根节点,机器第一次启动,创建/snowflake/ip:port-000000000,并上传数据
                 zk_AddressNode = createNode(curator);
                 //worker id 默认是0
+                //guozc 潜在并发问题？？两个节点同时去创建节点都成功了，因为worker默认是0可能会造成本地文件存储的id为0，极端情况下？
                 updateLocalWorkerID(workerID);
                 //定时上报本机时间给forever节点
+                //定时任务每三秒钟上报一下本机信息，里面关键信息是每次上报的时间戳，防止数显时钟回拨
                 ScheduledUploadData(curator, zk_AddressNode);
                 return true;
             } else {
+                //业务目录存在那么就检查是否有自己的节点
                 Map<String, Integer> nodeMap = Maps.newHashMap();//ip:port->00001
                 Map<String, String> realNode = Maps.newHashMap();//ip:port->(ipport-000001)
                 //存在根节点,先检查是否有属于自己的根节点
@@ -128,6 +138,9 @@ public class SnowflakeZookeeperHolder {
 
     }
 
+    /**
+     * 检查zookeeper中数据是否小于当前机器的系统时间，因为每个机器在zk中都有一个自己的节点用于存储endpoint数据
+     */
     private boolean checkInitTimeStamp(CuratorFramework curator, String zk_AddressNode) throws Exception {
         byte[] bytes = curator.getData().forPath(zk_AddressNode);
         Endpoint endPoint = deBuildData(new String(bytes));
